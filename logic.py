@@ -244,6 +244,61 @@ def bulk_recommend_dynamic_fsn_priority(fsn_df: pd.DataFrame,
 
     return pd.DataFrame(results), available
 
+def end_to_end_dynamic_from_excel(
+        xls_bytes_or_path,
+        sheet_sku="SKU_Master",
+        sheet_out="STOCK_OUT",
+        end_date=None,
+        warehouse_available=None,
+        max_capacity=WAREHOUSE_MAX_CAPACITY,
+        decay_rate=0.08):
+
+    xls = pd.ExcelFile(xls_bytes_or_path)
+    sku = pd.read_excel(xls, sheet_sku)
+    stock_out = pd.read_excel(xls, sheet_out)
+
+    stock_out['Date'] = pd.to_datetime(stock_out['Date'], errors='coerce')
+
+    if not end_date:
+        end_date = stock_out['Date'].max().strftime('%Y-%m-%d')
+
+    sales90 = build_sales_history_90(stock_out, end_date)
+    fsn = fsn_from_sales_90(sales90, lambda_decay=decay_rate)
+
+    if "OnHand" not in sku.columns:
+        sku["OnHand"] = 0
+    if "Lot_Size" not in sku.columns:
+        sku["Lot_Size"] = 100
+    if "Lead_Time" not in sku.columns:
+        sku["Lead_Time"] = 7
+
+    initial_available = (
+        calc_warehouse_available(sku, max_capacity)
+        if warehouse_available is None else int(warehouse_available)
+    )
+
+    rec_df, remain = bulk_recommend_dynamic_fsn_priority(
+        fsn, sku, initial_available
+    )
+
+    final = (
+        rec_df
+        .sort_values(
+            ["Decision", "FSN_Class", "Avg_Daily_Demand"],
+            ascending=[True, True, False]
+        )
+        .reset_index(drop=True)
+    )
+
+    return {
+        "Sales_History_90days": sales90,
+        "FSN_Classification": fsn,
+        "Recommendation": final,
+        "Warehouse_Initial_Available": int(initial_available),
+        "Warehouse_Remaining": int(remain),
+        "End_Date": end_date,
+        "Decay_Rate": decay_rate
+    }
 
 # ==========================================================
 # 7️⃣ Quick Test สำหรับ verify ว่า Safety Stock ทำงานถูกต้อง
