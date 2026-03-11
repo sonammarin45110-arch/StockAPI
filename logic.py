@@ -126,7 +126,7 @@ def recommend_row(row: dict, bot_cfg: dict, warehouse_available: int) -> dict:
     avg       = float(row.get('Avg_Daily_Demand', 0) or 0)
     std       = float(row.get('Std_Daily_Demand', 0) or 0)
     fsn       = str(row.get('FSN_Class', 'N') or 'N')
-    lot       = int(row.get('Lot_Size', 100) or 100)
+    moq       = int(row.get('MOQ', 0) or 0)
     lead_time = int(row.get('Lead_Time', 7) or 7)
 
     cfg    = bot_cfg[fsn]
@@ -169,12 +169,13 @@ def recommend_row(row: dict, bot_cfg: dict, warehouse_available: int) -> dict:
     after_capacity = min(raw_calc, int(warehouse_available))
 
     # =============================
-    # 3️⃣ LOT Adjustment
+    # 3️⃣ MOQ Check (แทน LOT)
     # =============================
-    if after_capacity >= lot:
-        final_qty = math.ceil(after_capacity / lot) * lot
-    else:
+
+    if moq > 0 and after_capacity < moq:
         final_qty = 0
+    else:
+        final_qty = after_capacity
 
     # =============================
     # 4️⃣ Reason Builder
@@ -184,8 +185,10 @@ def recommend_row(row: dict, bot_cfg: dict, warehouse_available: int) -> dict:
     if raw_calc != after_capacity:
         reason_parts.append(f"จำกัดด้วยความจุ {warehouse_available}")
 
-    if after_capacity != final_qty and final_qty > 0:
-        reason_parts.append(f"ปัดตาม LOT {lot}")
+    if moq > 0 and after_capacity < moq:
+        decision = "ปฏิเสธ"
+        priority = "ต่ำ"
+        reason_parts.append(f"ต่ำกว่า MOQ {moq}")
 
     if raw_calc > 0 and final_qty == 0 and warehouse_available <= 0:
         decision  = "รออนุมัติ"
@@ -204,7 +207,7 @@ def recommend_row(row: dict, bot_cfg: dict, warehouse_available: int) -> dict:
         "Safety_Stock"     : ss,           # ✅ ใหม่
         "Lead_Time"        : lead_time,    # ✅ ใหม่
         "ความต้องการจริง"  : raw_calc,
-        "Lot_Size"         : lot,
+        "MOQ"              : moq,
         "Recommended_Qty"  : final_qty,
         "Decision"         : decision,
         "Priority"         : priority,
@@ -219,11 +222,11 @@ def bulk_recommend_dynamic_fsn_priority(fsn_df: pd.DataFrame,
                                          sku_df: pd.DataFrame,
                                          warehouse_available: int):
     # ✅ เพิ่ม Lead_Time จาก SKU_Master
-    merge_cols = ["SKU", "OnHand", "Lot_Size", "Lead_Time"]
+    merge_cols = ["SKU", "OnHand", "MOQ", "Lead_Time"]
     merge_cols = [c for c in merge_cols if c in sku_df.columns]
 
     base = fsn_df.merge(sku_df[merge_cols], on="SKU", how="left")
-    base["Lot_Size"]  = base["Lot_Size"].fillna(100).astype(int)
+    base["MOQ"]  = base["MOQ"].fillna(0).astype(int)
     base["Lead_Time"] = base["Lead_Time"].fillna(7).astype(int)
 
     order = {"F": 1, "S": 2, "N": 3}
@@ -267,8 +270,8 @@ def end_to_end_dynamic_from_excel(
 
     if "OnHand" not in sku.columns:
         sku["OnHand"] = 0
-    if "Lot_Size" not in sku.columns:
-        sku["Lot_Size"] = 100
+    if "MOQ" not in sku.columns:
+        sku["MOQ"] = 0
     if "Lead_Time" not in sku.columns:
         sku["Lead_Time"] = 7
 
