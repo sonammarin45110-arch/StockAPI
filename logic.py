@@ -18,28 +18,53 @@ WAREHOUSE_MAX_CAPACITY = 30000
 # ==========================================================
 # 1️⃣ สร้างยอดขายย้อนหลัง 90 วัน
 # ==========================================================
-def build_sales_history_90(stock_out: pd.DataFrame, end_date=None) -> pd.DataFrame:
-    df = stock_out.rename(columns={'Qty': 'Sales_Qty'})
-    df = df[['Date', 'SKU', 'Sales_Qty']].copy()
-    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-    df = df.dropna(subset=['Date', 'SKU'])
-    df['SKU'] = df['SKU'].astype(str)
+def build_sales_history_monthly(stock_out: pd.DataFrame,
+                                 end_date: str = None,
+                                 lookback_months: int = 6) -> pd.DataFrame:
+    """
+    รวบรวมยอดขายย้อนหลัง N เดือน (default=6) แบบรายเดือน
+    เหมาะกับข้อมูลที่บันทึก event-based (ไม่ใช่รายวันสมบูรณ์)
 
-    end_dt   = pd.to_datetime(end_date) if end_date else df['Date'].max()
-    start_dt = end_dt - timedelta(days=89)
-    df = df[(df['Date'] >= start_dt) & (df['Date'] <= end_dt)]
+    Ref: Syntetos & Boylan (2005) - "The accuracy of intermittent
+         demand estimates", International Journal of Forecasting
+         → แนะนำ lookback ≥ 6 periods สำหรับ demand estimation
+    """
+    df = stock_out.rename(columns={"Qty": "Sales_Qty"}).copy()
+    df["Date"]  = pd.to_datetime(df["Date"], errors="coerce")
+    df["SKU"]   = df["SKU"].astype(str)
+    df = df.dropna(subset=["Date", "SKU"])
 
-    all_dates = pd.date_range(start=start_dt, end=end_dt, freq='D')
-    skus = df['SKU'].unique()
-    full = pd.MultiIndex.from_product([all_dates, skus], names=['Date', 'SKU'])
+    # แปลง Date → Month key (YYYYMM)
+    df["MonthKey"] = df["Date"].dt.to_period("M")
 
-    out = (
-        df.set_index(['Date', 'SKU'])
-        .reindex(full, fill_value=0)
+    if end_date:
+        end_period = pd.Period(end_date, "M")
+    else:
+        end_period = df["MonthKey"].max()
+
+    start_period = end_period - (lookback_months - 1)
+    df = df[(df["MonthKey"] >= start_period) & (df["MonthKey"] <= end_period)]
+
+    # aggregate รายเดือน
+    monthly = (
+        df.groupby(["MonthKey", "SKU"], as_index=False)["Sales_Qty"]
+        .sum()
+    )
+
+    # reindex ให้ครบทุก SKU ทุกเดือน (fill 0 ถ้าไม่มียอด)
+    all_periods = pd.period_range(start=start_period, end=end_period, freq="M")
+    skus        = df["SKU"].unique()
+    full_idx    = pd.MultiIndex.from_product([all_periods, skus],
+                                              names=["MonthKey", "SKU"])
+    monthly = (
+        monthly.set_index(["MonthKey", "SKU"])
+        .reindex(full_idx, fill_value=0)
         .reset_index()
     )
-    out.columns = ['Date', 'SKU', 'Sales_Qty']
-    return out
+
+    # เพิ่ม Months_Ago สำหรับ exponential decay
+    monthly["Months_Ago"] = (end_period - monthly["MonthKey"]).apply(lambda x: x.n)
+    return monthly
 
 
 # ==========================================================
@@ -58,53 +83,67 @@ def build_sales_history_90(stock_out: pd.DataFrame, end_date=None) -> pd.DataFra
 #
 #  ถ้ามี SKU ที่ไม่มีการเคลื่อนไหวเลย (mean=0) → จัด N โดยอัตโนมัติ
 # ==========================================================
-def fsn_from_sales_90(sales_90: pd.DataFrame, lambda_decay: float = 0.08) -> pd.DataFrame:
-    df = sales_90.copy()
-    df['Date'] = pd.to_datetime(df['Date'])
-    df = df.sort_values(['SKU', 'Date'])
+def fsn_from_sales_monthly(sales_monthly: pd.DataFrame,
+                            lambda_decay: float = 0.15) -> pd.DataFrame:
+    """
+    คำนวณ FSN + Demand Parameters จากข้อมูลรายเดือน
 
-    last_date = df['Date'].max()
-    df['Days_Ago']       = (last_date - df['Date']).dt.days
-    df['Weight']         = np.exp(-lambda_decay * df['Days_Ago'])
-    df['Weighted_Sales'] = df['Sales_Qty'] * df['Weight']
+    Weighted Avg: decay รายเดือน (lambda=0.15 → เดือนก่อนมีน้ำหนัก ~86%)
+    FSN: CV-based (Tersine 1994)
+         F = CV ≤ median → ขายสม่ำเสมอ
+         S = CV > median → ขายผันผวน
+         N = ไม่มีการเคลื่อนไหวเลย (Months_Active = 0)
 
-    agg = df.groupby('SKU', as_index=False).agg(
-        Days_Sold_90       = ('Sales_Qty', lambda x: (x > 0).sum()),
-        Total_Sales_90days = ('Sales_Qty', 'sum'),
-        Weighted_Sum       = ('Weighted_Sales', 'sum'),
-        Weight_Total       = ('Weight', 'sum'),
-        Std_Daily_Demand   = ('Sales_Qty', 'std'),
-        Mean_Raw           = ('Sales_Qty', 'mean'),
+    lambda_decay=0.15 สำหรับรายเดือน ≈ lambda=0.05 รายวัน
+    Ref: Gardner (1985) Exponential Smoothing, J. of Forecasting
+    """
+    df = sales_monthly.copy()
+    df["Weight"]         = np.exp(-lambda_decay * df["Months_Ago"])
+    df["Weighted_Sales"] = df["Sales_Qty"] * df["Weight"]
+
+    agg = df.groupby("SKU", as_index=False).agg(
+        Months_Active      = ("Sales_Qty", lambda x: (x > 0).sum()),
+        Total_Sales        = ("Sales_Qty", "sum"),
+        Weighted_Sum       = ("Weighted_Sales", "sum"),
+        Weight_Total       = ("Weight", "sum"),
+        Std_Monthly_Demand = ("Sales_Qty", "std"),
+        Mean_Monthly_Raw   = ("Sales_Qty", "mean"),
+        Lookback_Months    = ("Sales_Qty", "count"),
     )
 
-    agg['Avg_Daily_Demand'] = agg['Weighted_Sum'] / agg['Weight_Total']
-    agg['Turnover_Rate']    = (agg['Days_Sold_90'] / 90) * 100
-    agg['Std_Daily_Demand'] = agg['Std_Daily_Demand'].fillna(0)
+    # Weighted avg monthly demand
+    agg["Avg_Monthly_Demand"] = agg["Weighted_Sum"] / agg["Weight_Total"]
+    # แปลงเป็น daily (หาร 30)
+    agg["Avg_Daily_Demand"]   = agg["Avg_Monthly_Demand"] / 30
+    agg["Std_Daily_Demand"]   = (agg["Std_Monthly_Demand"].fillna(0)) / 30
 
-    # ✅ CV = σ / μ (ใช้ mean raw สำหรับ CV ไม่ใช่ weighted)
-    agg['CV'] = agg.apply(
-        lambda r: r['Std_Daily_Demand'] / r['Mean_Raw'] if r['Mean_Raw'] > 0 else 999,
+    # CV = σ_monthly / μ_monthly
+    agg["CV"] = agg.apply(
+        lambda r: r["Std_Monthly_Demand"] / r["Mean_Monthly_Raw"]
+                  if r["Mean_Monthly_Raw"] > 0 else 999,
         axis=1
     )
 
-    # threshold = median CV ของ dataset (data-driven)
-    # ถ้าทุก SKU active → F/S เท่านั้น
-    # ถ้ามี SKU ที่ Days_Sold_90 = 0 → N
-    active_mask = agg['Days_Sold_90'] > 0
-    cv_median   = agg.loc[active_mask, 'CV'].median()
+    # Turnover Rate = % เดือนที่มีการเคลื่อนไหว
+    agg["Turnover_Rate"] = (agg["Months_Active"] / agg["Lookback_Months"]) * 100
+
+    # FSN Classification (CV-based, data-driven threshold)
+    active_mask = agg["Months_Active"] > 0
+    cv_median   = agg.loc[active_mask, "CV"].median() if active_mask.any() else 1.0
 
     def classify(row):
-        if row['Days_Sold_90'] == 0:
-            return 'N'                    # Non-moving จริงๆ
-        elif row['CV'] <= cv_median:
-            return 'F'                    # CV ต่ำ = สม่ำเสมอ
+        if row["Months_Active"] == 0:
+            return "N"
+        elif row["CV"] <= cv_median:
+            return "F"
         else:
-            return 'S'                    # CV สูง = ผันผวน
+            return "S"
 
-    agg['FSN_Class'] = agg.apply(classify, axis=1)
+    agg["FSN_Class"] = agg.apply(classify, axis=1)
 
-    return agg[['SKU', 'FSN_Class', 'CV', 'Days_Sold_90', 'Turnover_Rate',
-                'Avg_Daily_Demand', 'Std_Daily_Demand', 'Total_Sales_90days']]
+    return agg[["SKU", "FSN_Class", "CV", "Months_Active", "Turnover_Rate",
+                "Avg_Daily_Demand", "Std_Daily_Demand",
+                "Avg_Monthly_Demand", "Total_Sales", "Lookback_Months"]]
 
 
 # ==========================================================
@@ -247,7 +286,8 @@ def end_to_end_dynamic_from_excel(
         end_date            = None,
         warehouse_available = None,
         max_capacity        = WAREHOUSE_MAX_CAPACITY,
-        decay_rate          = 0.08):
+        decay_rate          = 0.15,      # ✅ ปรับเป็น monthly decay
+        lookback_months     = 6):        # ✅ ใหม่: lookback 6 เดือน
 
     xls       = pd.ExcelFile(xls_bytes_or_path)
     sku       = pd.read_excel(xls, sheet_sku)
@@ -257,8 +297,9 @@ def end_to_end_dynamic_from_excel(
     if not end_date:
         end_date = stock_out['Date'].max().strftime('%Y-%m-%d')
 
-    sales90 = build_sales_history_90(stock_out, end_date)
-    fsn     = fsn_from_sales_90(sales90, lambda_decay=decay_rate)
+    sales90 = build_sales_history_monthly(stock_out, end_date,
+                                          lookback_months=lookback_months)
+    fsn     = fsn_from_sales_monthly(sales90, lambda_decay=decay_rate)
 
     for col, default in [("OnHand", 0), ("MOQ", 0), ("Lead_Time", 7)]:
         if col not in sku.columns:
@@ -279,13 +320,14 @@ def end_to_end_dynamic_from_excel(
     )
 
     return {
-        "Sales_History_90days"        : sales90,
+        "Sales_History_Monthly"       : sales90,
         "FSN_Classification"          : fsn,
         "Recommendation"              : final,
         "Warehouse_Initial_Available" : int(initial_available),
         "Warehouse_Remaining"         : int(remain),
         "End_Date"                    : end_date,
         "Decay_Rate"                  : decay_rate,
+        "Lookback_Months"             : lookback_months,
     }
 
 
@@ -293,28 +335,35 @@ def end_to_end_dynamic_from_excel(
 # 8️⃣ Quick Test
 # ==========================================================
 if __name__ == "__main__":
-    print("=" * 60)
-    print("FSN Classification — CV-based (Tersine 1994)")
-    print("=" * 60)
+    print("=" * 65)
+    print("BOT Engine — Monthly Lookback + CV-based FSN")
+    print("=" * 65)
     print("""
-  หลักการ: Coefficient of Variation (CV = σ/μ)
-  ─────────────────────────────────────────────
-  F (Fast-moving)  : CV ≤ median(CV)  → ขายสม่ำเสมอ ผันผวนต่ำ
-  S (Slow-moving)  : CV > median(CV)  → ขายผันผวน คาดการณ์ยาก
-  N (Non-moving)   : Days_Sold = 0    → ไม่มีการเคลื่อนไหวจริงๆ
+  Lookback Window: 6 เดือนล่าสุด (เดิม 90 วัน)
+  ─────────────────────────────────────────────────────────────
+  เหตุผล:
+  - ข้อมูลเป็น event-based (10 transactions/เดือน ไม่ใช่รายวัน)
+  - 90 วัน → ข้อมูลจริงแค่ ~30 rows/SKU มี 0 เยอะมาก
+  - 6 เดือน = สมดุล trend ล่าสุด + stability เพียงพอ
+  Ref: Syntetos & Boylan (2005), Int'l Journal of Forecasting
 
-  อ้างอิง:
-  - Tersine, R.J. (1994). Principles of Inventory and
-    Materials Management, 4th ed. Prentice Hall.
-  - Gopalakrishnan, P. & Sundaresan, M. (1994).
-    Materials Management: An Integrated Approach.
-  - Silver, Pyke & Peterson (1998). Inventory Management
-    and Production Planning and Scheduling, 3rd ed.
-    (Safety Stock formula: SS = Z × σ × √LT)
+  Weighted Decay: λ = 0.15/เดือน (เดิม 0.08/วัน)
+  → เดือนก่อน weight = e^(-0.15) ≈ 86%
+  → 6 เดือนก่อน weight = e^(-0.90) ≈ 41%
+  Ref: Gardner (1985), Journal of Forecasting
+
+  FSN Classification: CV-based (ไม่ใช้ absolute threshold)
+  - F : CV ≤ median(CV) → ขายสม่ำเสมอ
+  - S : CV > median(CV) → ขายผันผวน
+  - N : Months_Active = 0 → Non-moving จริงๆ
+  Ref: Tersine (1994), Gopalakrishnan & Sundaresan (1994)
+
+  Safety Stock: SS = Z × σ_daily × √Lead_Time
+  Ref: Silver, Pyke & Peterson (1998)
     """)
 
-    print("Safety Stock Verification:")
-    print("-" * 60)
+    print("Safety Stock Verification (σ=5.0/day, LT=7d):")
+    print("-" * 65)
     for fsn_class, cfg in BOT_CONFIG.items():
-        ss = calc_safety_stock(std_demand=5.0, lead_time=7, z=cfg['Z'])
-        print(f"  {fsn_class} | Z={cfg['Z']} | σ=5.0/day | LT=7d → SS={ss} units")
+        ss = calc_safety_stock(std_demand=5.0, lead_time=7, z=cfg["Z"])
+        print(f"  {fsn_class} | Z={cfg['Z']} | → SS={ss} units")
