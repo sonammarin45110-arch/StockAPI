@@ -7,7 +7,7 @@ from datetime import timedelta
 # CONFIG
 # ==========================================================
 BOT_CONFIG = {
-    "F": {"Min_Cover_Days": 7,  "Target_Cover_Days": 14, "Max_Cover_Days": 21, "Z": 1.65},
+    "F": {"Min_Cover_Days": 7,  "Target_Cover_Days": 30, "Max_Cover_Days": 45, "Z": 1.65},
     "S": {"Min_Cover_Days": 14, "Target_Cover_Days": 30, "Max_Cover_Days": 45, "Z": 1.28},
     "N": {"Min_Cover_Days": 30, "Target_Cover_Days": 60, "Max_Cover_Days": 90, "Z": 1.04},
 }
