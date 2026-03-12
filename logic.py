@@ -115,7 +115,7 @@ def fsn_from_sales_monthly(sales_monthly: pd.DataFrame,
     agg["Avg_Monthly_Demand"] = agg["Weighted_Sum"] / agg["Weight_Total"]
     # แปลงเป็น daily (หาร 30)
     agg["Avg_Daily_Demand"]   = agg["Avg_Monthly_Demand"] / 30
-    agg["Std_Daily_Demand"]   = (agg["Std_Monthly_Demand"].fillna(0)) / np.sqrt(30)
+    agg["Std_Daily_Demand"] = (agg["Std_Monthly_Demand"].fillna(0)) / 30
 
     # CV = σ_monthly / μ_monthly
     agg["CV"] = agg.apply(
@@ -162,10 +162,6 @@ def calc_warehouse_available(sku_df: pd.DataFrame,
 # 4️⃣ คำนวณ Safety Stock รายตัว
 # ==========================================================
 def calc_safety_stock(std_demand: float, lead_time: int, z: float) -> int:
-    if not std_demand or not lead_time:
-        return 0
-    if math.isnan(std_demand) or math.isnan(float(lead_time)):
-        return 0
     if std_demand <= 0 or lead_time <= 0:
         return 0
     return math.ceil(z * std_demand * math.sqrt(lead_time))

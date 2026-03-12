@@ -114,34 +114,45 @@ async def analyze_excel_xlsx(data: ExcelBase64Request):
             warehouse_available = warehouse_available,
             decay_rate          = data.decay_rate,
             max_capacity        = data.max_capacity,
-            lookback_months     = data.lookback_months,
+            lookback_months     = data.lookback_months,   # ✅ ใหม่
         )
 
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as w:
-            out["Sales_History_Monthly"].to_excel(w, index=False, sheet_name="Sales_History_Monthly")
-            out["FSN_Classification"].to_excel(w, index=False, sheet_name="FSN_Classification")
-            out["Recommendation"].to_excel(w, index=False, sheet_name="Recommendation")
+            # ✅ เปลี่ยนชื่อ key: Sales_History_90days → Sales_History_Monthly
+            out["Sales_History_Monthly"].to_excel(
+                w, index=False, sheet_name="Sales_History_Monthly")
+            out["FSN_Classification"].to_excel(
+                w, index=False, sheet_name="FSN_Classification")
+            out["Recommendation"].to_excel(
+                w, index=False, sheet_name="Recommendation")
+
             pd.DataFrame([{
                 "Warehouse_Max_Capacity"     : data.max_capacity,
                 "Warehouse_Initial_Available": warehouse_available,
                 "Warehouse_Remaining"        : out["Warehouse_Remaining"],
                 "SKU_Count"                  : len(out["Recommendation"]),
                 "Lambda_Decay"               : out["Decay_Rate"],
-                "Lookback_Months"            : out["Lookback_Months"],
+                "Lookback_Months"            : out["Lookback_Months"],  # ✅ ใหม่
                 "End_Date"                   : out["End_Date"],
             }]).to_excel(w, index=False, sheet_name="Summary")
 
         buf.seek(0)
-        # ✅ เปลี่ยนจาก StreamingResponse → return base64
-        encoded = base64.b64encode(buf.read()).decode("utf-8")
-        return {"success": True, "file_base64": encoded}
+        filename = f"Bot_Recommendation_{int(time.time())}.xlsx"
+
+        return StreamingResponse(
+            buf,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
 
     except Exception as e:
         return JSONResponse(
             status_code=400,
             content={"success": False, "error": str(e)},
         )
+
+
 # ==========================================================
 # 3) Swagger Upload File → Return Excel
 # ✅ เพิ่ม lookback_months Form param / ปรับ decay_rate default
