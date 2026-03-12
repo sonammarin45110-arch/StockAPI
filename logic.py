@@ -115,7 +115,7 @@ def fsn_from_sales_monthly(sales_monthly: pd.DataFrame,
     agg["Avg_Monthly_Demand"] = agg["Weighted_Sum"] / agg["Weight_Total"]
     # แปลงเป็น daily (หาร 30)
     agg["Avg_Daily_Demand"]   = agg["Avg_Monthly_Demand"] / 30
-    agg["Std_Daily_Demand"] = (agg["Std_Monthly_Demand"].fillna(0)) / math.sqrt(30)
+    agg["Std_Daily_Demand"]   = (agg["Std_Monthly_Demand"].fillna(0)) / 30
 
     # CV = σ_monthly / μ_monthly
     agg["CV"] = agg.apply(
@@ -162,6 +162,11 @@ def calc_warehouse_available(sku_df: pd.DataFrame,
 # 4️⃣ คำนวณ Safety Stock รายตัว
 # ==========================================================
 def calc_safety_stock(std_demand: float, lead_time: int, z: float) -> int:
+    """
+    Safety Stock = Z × σ_demand × √Lead_Time
+    Ref: Silver, Pyke & Peterson (1998) - Inventory Management and
+         Production Planning and Scheduling, 3rd ed.
+    """
     if std_demand <= 0 or lead_time <= 0:
         return 0
     return math.ceil(z * std_demand * math.sqrt(lead_time))
@@ -173,8 +178,7 @@ def calc_safety_stock(std_demand: float, lead_time: int, z: float) -> int:
 def recommend_row(row: dict, bot_cfg: dict, warehouse_available: int) -> dict:
     on_hand   = int(row.get('OnHand', 0))
     avg       = float(row.get('Avg_Daily_Demand', 0) or 0)
-    std = float(row.get('Std_Daily_Demand') or 0)
-    std = 0 if math.isnan(std) else std
+    std       = float(row.get('Std_Daily_Demand', 0) or 0)
     fsn       = str(row.get('FSN_Class', 'S') or 'S')
     moq       = int(row.get('MOQ', 0) or 0)
     lead_time = int(row.get('Lead_Time', 7) or 7)
