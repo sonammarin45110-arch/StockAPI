@@ -115,7 +115,7 @@ def fsn_from_sales_monthly(sales_monthly: pd.DataFrame,
     agg["Avg_Monthly_Demand"] = agg["Weighted_Sum"] / agg["Weight_Total"]
     # แปลงเป็น daily (หาร 30)
     agg["Avg_Daily_Demand"]   = agg["Avg_Monthly_Demand"] / 30
-    agg["Std_Daily_Demand"]   = (agg["Std_Monthly_Demand"].fillna(0)) / 30
+    agg["Std_Daily_Demand"]   = (agg["Std_Monthly_Demand"].fillna(0)) / np.sqrt(30)
 
     # CV = σ_monthly / μ_monthly
     agg["CV"] = agg.apply(
